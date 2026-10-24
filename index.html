@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>解压玩偶 · 原型 v0.1</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{width:100%;height:100%;overflow:hidden;background:#2b2b3a;font-family:"PingFang SC","Microsoft YaHei",sans-serif}
+  #wrap{position:relative;width:100%;height:100%;display:flex;align-items:center;justify-content:center}
+  canvas{display:block;background:#ffe9c9;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.45);touch-action:none}
+  #hud{position:absolute;top:10px;left:50%;transform:translateX(-50%);width:min(92vw,460px);pointer-events:none;z-index:5}
+  .row{display:flex;gap:8px;justify-content:center;align-items:center}
+  .pill{background:rgba(255,255,255,.92);border:2px solid #3a3a4a;border-radius:999px;padding:4px 12px;font-weight:bold;font-size:14px;color:#3a3a4a;box-shadow:0 2px 0 #3a3a4a}
+  .pill b{color:#e23b2e}
+  #meterWrap{margin-top:8px;background:rgba(255,255,255,.92);border:2px solid #3a3a4a;border-radius:999px;height:18px;overflow:hidden;box-shadow:0 2px 0 #3a3a4a}
+  #meter{height:100%;width:0%;background:linear-gradient(90deg,#ffb340,#ff7a6b);transition:width .2s}
+  #meterLabel{text-align:center;font-size:12px;font-weight:bold;color:#fff;text-shadow:0 1px 2px #000;margin-top:3px}
+  #tools{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);display:flex;gap:8px;z-index:5}
+  .tool{width:56px;height:56px;border-radius:50%;border:3px solid #3a3a4a;background:#fff;font-size:24px;cursor:pointer;box-shadow:0 3px 0 #3a3a4a;display:flex;align-items:center;justify-content:center;flex-direction:column}
+  .tool small{font-size:9px;font-weight:bold;color:#3a3a4a;line-height:1}
+  .tool.sel{background:#ffd93b;transform:translateY(2px);box-shadow:0 1px 0 #3a3a4a}
+  #reset{position:absolute;top:10px;right:10px;z-index:6;background:rgba(255,255,255,.92);border:2px solid #3a3a4a;border-radius:999px;padding:5px 12px;font-size:12px;font-weight:bold;cursor:pointer}
+  #tip{position:absolute;bottom:80px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.55);color:#fff;padding:6px 14px;border-radius:999px;font-size:13px;pointer-events:none;z-index:5;white-space:nowrap}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="cv" width="480" height="720"></canvas>
+  <div id="hud">
+    <div class="row">
+      <div class="pill">总伤害 <b id="dmg">0</b></div>
+      <div class="pill">连击 <b id="combo">0</b></div>
+      <div class="pill">最高连击 <b id="maxCombo">0</b></div>
+    </div>
+    <div id="meterWrap"><div id="meter"></div></div>
+    <div id="meterLabel">解压值</div>
+  </div>
+  <button id="reset">重新开始</button>
+  <div id="tip">点玩偶出招 · 选下面工具换花样</div>
+  <div id="tools"></div>
+</div>
+<script>
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const W = 480, H = 720;
+/* 自适应缩放:画布按窗口等比缩放 */
+function fit(){
+  const s = Math.min(innerWidth / W, innerHeight / H);
+  cv.style.width = (W * s) + 'px'; cv.style.height = (H * s) + 'px';
+}
+addEventListener('resize', fit); fit();
+
+/* ============ 音效(WebAudio 合成,无外部文件) ============ */
+let AC = null;
+function audioInit(){
+  if(!AC){ try{ AC = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){} }
+  if(AC && AC.state === 'suspended'){ const p = AC.resume(); if(p && p.catch) p.catch(()=>{}); }
+}
+document.addEventListener('touchstart', audioInit, {passive:true});
+document.addEventListener('pointerdown', audioInit, {passive:true});
+if(window.WeixinJSBridge){ audioInit(); } else { document.addEventListener('WeixinJSBridgeReady', audioInit, false); }
+function thud(vol){
+  audioInit(); if(!AC) return; const t = AC.currentTime;
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.type = 'sine'; o.frequency.setValueAtTime(160, t); o.frequency.exponentialRampToValueAtTime(45, t + .12);
+  g.gain.setValueAtTime(vol || .5, t); g.gain.exponentialRampToValueAtTime(.001, t + .15);
+  o.connect(g); g.connect(AC.destination); o.start(t); o.stop(t + .16);
+}
+function slapSnd(){
+  audioInit(); if(!AC) return; const t = AC.currentTime, len = Math.floor(AC.sampleRate * .06), buf = AC.createBuffer(1, len, AC.sampleRate), d = buf.getChannelData(0);
+  for(let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+  const src = AC.createBufferSource(); src.buffer = buf;
+  const f = AC.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = 1200;
+  const g = AC.createGain(); g.gain.value = .4;
+  src.connect(f); f.connect(g); g.connect(AC.destination); src.start(t);
+}
+function crackSnd(){
+  audioInit(); if(!AC) return; const t = AC.currentTime, len = Math.floor(AC.sampleRate * .12), buf = AC.createBuffer(1, len, AC.sampleRate), d = buf.getChannelData(0);
+  for(let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2);
+  const src = AC.createBufferSource(); src.buffer = buf;
+  const g = AC.createGain(); g.gain.value = .5;
+  src.connect(g); g.connect(AC.destination); src.start(t);
+}
+function boing(){
+  audioInit(); if(!AC) return; const t = AC.currentTime, o = AC.createOscillator(), g = AC.createGain();
+  o.type = 'sine'; o.frequency.setValueAtTime(200, t); o.frequency.exponentialRampToValueAtTime(700, t + .18);
+  g.gain.setValueAtTime(.25, t); g.gain.exponentialRampToValueAtTime(.001, t + .2);
+  o.connect(g); g.connect(AC.destination); o.start(t); o.stop(t + .21);
+}
+function ding(){
+  audioInit(); if(!AC) return; const t = AC.currentTime;
+  [660, 880].forEach((fq, i)=>{
+    const o = AC.createOscillator(), g = AC.createGain();
+    o.type = 'sine'; o.frequency.value = fq;
+    g.gain.setValueAtTime(.18, t + i * .09); g.gain.exponentialRampToValueAtTime(.001, t + i * .09 + .15);
+    o.connect(g); g.connect(AC.destination); o.start(t + i * .09); o.stop(t + i * .09 + .16);
+  });
+}
+
+/* ============ 工具 ============ */
+const TOOLS = [
+  { id:'fist',   emoji:'👊', name:'拳头', dmg:10, kick:6,  squash:.32, shake:3, snd:()=>thud(.5),  words:['哎哟!','好疼!','轻点!'] },
+  { id:'slap',   emoji:'✋', name:'巴掌', dmg:6,  kick:3,  squash:.2,  shake:1, snd:slapSnd,      words:['啪!','哎呀!'] },
+  { id:'bat',    emoji:'🏏', name:'棒子', dmg:18, kick:12, squash:.4,  shake:6, snd:()=>thud(.65), words:['哇啊!','飞啦!'] },
+  { id:'whip',   emoji:'🪢', name:'鞭子', dmg:12, kick:8,  squash:.28, shake:3, snd:crackSnd,     words:['嗷!','抽疼了!'] },
+  { id:'hammer', emoji:'🔨', name:'锤子', dmg:25, kick:10, squash:.5,  shake:9, snd:()=>thud(.8),  words:['晕晕的~','满天星星!'] },
+  { id:'feather',emoji:'🪶', name:'挠痒', dmg:2,  kick:1,  squash:.12, shake:0, snd:boing,        words:['哈哈哈!','好痒好痒!'] },
+];
+let toolIdx = 0;
+const toolsEl = document.getElementById('tools');
+TOOLS.forEach((t, i)=>{
+  const b = document.createElement('button');
+  b.className = 'tool' + (i === 0 ? ' sel' : '');
+  b.innerHTML = t.emoji + '<small>' + t.name + '</small>';
+  b.addEventListener('click', ()=>{
+    toolIdx = i; audioInit();
+    toolsEl.querySelectorAll('.tool').forEach((el, j)=> el.classList.toggle('sel', j === i));
+  });
+  toolsEl.appendChild(b);
+});
+
+/* ============ 玩偶状态(弹簧物理:挤压 + 摇晃 + 弹跳) ============ */
+const doll = {
+  x: W / 2, y: 560, rot: 0, rotV: 0, sq: 0, sqV: 0, hop: 0, hopV: 0,
+  face: 'idle', faceT: 0, blink: 0, blinkT: 2000,
+};
+let totalDmg = 0, combo = 0, maxCombo = 0, lastHitT = 0, meter = 0;
+let floats = [];   /*飘字 {x,y,txt,life,col} */
+let stars = [];    /*解压爆发星星 */
+let shake = 0;
+const dmgEl = document.getElementById('dmg'), comboEl = document.getElementById('combo'),
+      maxEl = document.getElementById('maxCombo'), meterEl = document.getElementById('meter');
+const SAY = ['哎哟!', '好疼!', '轻点!', '哇啊!', '晕晕的~', '哈哈哈!', '再来!', '解压!'];
+
+function say(txt, x, y){
+  floats.push({ x: x || doll.x + (Math.random() * 80 - 40), y: y || doll.y - 260, txt, life: 1 });
+}
+function hit(px, py){
+  audioInit();
+  const t = TOOLS[toolIdx];
+  const now = performance.now();
+  combo = (now - lastHitT < 1500) ? combo + 1 : 1;
+  lastHitT = now; if(combo > maxCombo) maxCombo = combo;
+  const dmg = Math.round(t.dmg * (1 + Math.min(combo, 20) * .05));
+  totalDmg += dmg; meter = Math.min(100, meter + dmg * .55);
+  /*弹簧:挤压 + 朝点击反方向摇晃 + 小弹跳*/
+  doll.sqV -= t.squash * 14;
+  doll.rotV += (px < doll.x ? -1 : 1) * t.kick * .045;
+  doll.hopV -= t.kick * .35;
+  shake = Math.max(shake, t.shake);
+  t.snd();
+  floats.push({ x: px, y: py - 20, txt: '-' + dmg, life: 1, col: '#e23b2e' });
+  const w = t.words[Math.floor(Math.random() * t.words.length)];
+  say(w);
+  doll.face = (toolIdx === 5) ? 'laugh' : (t.dmg >= 18 ? 'dizzy' : 'ouch');
+  doll.faceT = 900;
+  if(meter >= 100){
+    meter = 0; ding();
+    for(let i = 0; i < 26; i++){
+      const a = Math.random() * Math.PI * 2, v = 2 + Math.random() * 4;
+      stars.push({ x: doll.x, y: doll.y - 150, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 2, life: 1 });
+    }
+    say('压力释放!', doll.x, doll.y - 320);
+    doll.face = 'happy'; doll.faceT = 1600;
+  }
+  dmgEl.textContent = totalDmg; comboEl.textContent = combo; maxEl.textContent = maxCombo;
+  meterEl.style.width = meter + '%';
+}
+
+/* 点击/触摸玩偶:命中判定(椭圆身体区) */
+function onHit(e){
+  audioInit();
+  const r = cv.getBoundingClientRect();
+  const cx = (e.clientX - r.left) * (W / r.width), cy = (e.clientY - r.top) * (H / r.height);
+  const dx = (cx - doll.x) / 110, dy = (cy - (doll.y - 130)) / 150;
+  if(dx * dx + dy * dy <= 1) hit(cx, cy);
+  else say('打偏啦~', cx, cy - 20);
+}
+cv.addEventListener('pointerdown', onHit);
+document.getElementById('reset').addEventListener('click', ()=>{
+  totalDmg = 0; combo = 0; maxCombo = 0; meter = 0; floats = []; stars = [];
+  doll.rot = 0; doll.rotV = 0; doll.sq = 0; doll.sqV = 0; doll.hop = 0; doll.hopV = 0; doll.face = 'idle';
+  dmgEl.textContent = 0; comboEl.textContent = 0; maxEl.textContent = 0; meterEl.style.width = '0%';
+  audioInit(); ding();
+});
+
+/* ============ 绘制 ============ */
+function rr(x, y, w, h, r){
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function circ(x, y, r){ ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); }
+function drawRoom(){
+  ctx.fillStyle = '#ffe9c9'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#ffd9a0'; ctx.fillRect(0, 0, W, 60);
+  ctx.fillStyle = '#fff3dd';
+  for(let i = 0; i < 5; i++) ctx.fillRect(20 + i * 96, 18, 60, 26);
+  ctx.fillStyle = '#e8b07d'; ctx.fillRect(0, 600, W, 120);
+  ctx.fillStyle = '#d99a63'; for(let x = 0; x < W; x += 60) ctx.fillRect(x, 600, 2, 120);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 22px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText('解压小屋', W / 2, 42);
+}
+function drawDoll(){
+  const squash = 1 + doll.sq * .12, stretch = 1 - doll.sq * .08;
+  ctx.save();
+  ctx.translate(doll.x, doll.y + doll.hop);
+  ctx.rotate(doll.rot);
+  ctx.scale(stretch, squash);
+  /*影子*/
+  ctx.fillStyle = 'rgba(0,0,0,.18)'; ctx.beginPath(); ctx.ellipse(0, 6, 92, 16, 0, 0, Math.PI * 2); ctx.fill();
+  /*身体(布偶)*/
+  ctx.fillStyle = '#ffb7a1'; rr(-78, -190, 156, 150, 60); ctx.fill();
+  ctx.strokeStyle = '#e8957a'; ctx.lineWidth = 3; rr(-78, -190, 156, 150, 60); ctx.stroke();
+  /*肚皮补丁*/
+  ctx.fillStyle = '#ffd9c9'; ctx.beginPath(); ctx.ellipse(0, -115, 52, 44, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#e8957a'; ctx.setLineDash([6, 6]); ctx.beginPath(); ctx.ellipse(0, -115, 52, 44, 0, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
+  /*胳膊*/
+  ctx.fillStyle = '#ffb7a1';
+  ctx.save(); ctx.rotate(-.5); rr(-108, -170, 44, 88, 22); ctx.fill(); ctx.stroke(); ctx.restore();
+  ctx.save(); ctx.rotate(.5); rr(64, -170, 44, 88, 22); ctx.fill(); ctx.stroke(); ctx.restore();
+  /*腿*/
+  ctx.fillStyle = '#ffb7a1'; rr(-66, -48, 52, 52, 20); ctx.fill(); ctx.stroke();
+  rr(14, -48, 52, 52, 20); ctx.fill(); ctx.stroke();
+  /*头*/
+  ctx.fillStyle = '#ffcfb8'; circ(0, -250, 82); ctx.fill();
+  ctx.strokeStyle = '#e8957a'; ctx.lineWidth = 3; circ(0, -250, 82); ctx.stroke();
+  /*耳朵*/
+  ctx.fillStyle = '#ffcfb8'; circ(-62, -310, 22); ctx.fill(); ctx.stroke(); circ(62, -310, 22); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#f7a58c'; circ(-62, -310, 10); ctx.fill(); circ(62, -310, 10); ctx.fill();
+  /*纽扣眼睛 + 表情*/
+  const blink = doll.blinkT < 120;
+  if(doll.face === 'dizzy'){
+    ctx.strokeStyle = '#3a3a4a'; ctx.lineWidth = 3;
+    [-32, 32].forEach(ex=>{
+      ctx.beginPath();
+      for(let a = 0; a < Math.PI * 4; a += .5){ const r = 4 + a * 2.2, px = ex + Math.cos(a) * r, py = -258 + Math.sin(a) * r; a === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py); }
+      ctx.stroke();
+    });
+  } else if(blink){
+    ctx.strokeStyle = '#3a3a4a'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(-44, -258); ctx.lineTo(-20, -258); ctx.moveTo(20, -258); ctx.lineTo(44, -258); ctx.stroke();
+  } else {
+    ctx.fillStyle = '#3a3a4a'; circ(-32, -258, 9); ctx.fill(); circ(32, -258, 9); ctx.fill();
+    ctx.fillStyle = '#fff'; circ(-29, -261, 3); ctx.fill(); circ(35, -261, 3); ctx.fill();
+  }
+  /*腮红*/
+  ctx.fillStyle = 'rgba(255,120,120,.5)'; circ(-52, -232, 12); ctx.fill(); circ(52, -232, 12); ctx.fill();
+  /*嘴(缝线笑 / 哎哟 / 大笑)*/
+  ctx.strokeStyle = '#3a3a4a'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+  ctx.beginPath();
+  if(doll.face === 'laugh'){ ctx.arc(0, -236, 26, .15 * Math.PI, .85 * Math.PI); }
+  else if(doll.face === 'ouch'){ ctx.arc(0, -214, 16, 1.15 * Math.PI, 1.85 * Math.PI); }
+  else if(doll.face === 'happy'){ ctx.arc(0, -240, 30, .1 * Math.PI, .9 * Math.PI); }
+  else { ctx.moveTo(-18, -226); ctx.quadraticCurveTo(0, -214, 18, -226); }
+  ctx.stroke();
+  ctx.strokeStyle = '#e8957a'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(-24, -228); ctx.lineTo(-14, -228); ctx.moveTo(14, -228); ctx.lineTo(24, -228); ctx.stroke();
+  /*汗滴(连击高时)*/
+  if(combo >= 8){
+    ctx.fillStyle = '#7ecbff'; ctx.beginPath(); ctx.ellipse(-78, -290, 8, 12, -.4, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+function drawFloats(){
+  ctx.textAlign = 'center';
+  floats.forEach(f=>{
+    ctx.globalAlpha = Math.max(0, f.life);
+    ctx.font = 'bold ' + (f.col ? 30 : 22) + 'px sans-serif';
+    ctx.fillStyle = f.col || '#fff';
+    ctx.strokeStyle = 'rgba(0,0,0,.4)'; ctx.lineWidth = 4;
+    ctx.strokeText(f.txt, f.x, f.y); ctx.fillText(f.txt, f.x, f.y);
+  });
+  ctx.globalAlpha = 1;
+}
+function drawStars(){
+  stars.forEach(s=>{
+    ctx.globalAlpha = Math.max(0, s.life);
+    ctx.fillStyle = '#ffd93b';
+    ctx.save(); ctx.translate(s.x, s.y); ctx.rotate(s.life * 3);
+    ctx.beginPath();
+    for(let i = 0; i < 5; i++){
+      const a = -Math.PI / 2 + i * (Math.PI * 4 / 5), a2 = a + Math.PI / 5;
+      ctx.lineTo(Math.cos(a) * 12, Math.sin(a) * 12); ctx.lineTo(Math.cos(a2) * 5, Math.sin(a2) * 5);
+    }
+    ctx.closePath(); ctx.fill(); ctx.restore();
+  });
+  ctx.globalAlpha = 1;
+}
+function loop(){
+  const dt = 16.7;
+  /*弹簧回弹*/
+  doll.rotV += -doll.rot * .012 * dt; doll.rotV *= .9; doll.rot += doll.rotV * dt / 16.7;
+  doll.sqV += -doll.sq * .02 * dt; doll.sqV *= .88; doll.sq += doll.sqV * dt / 16.7;
+  doll.hopV += .5 * dt / 16.7; doll.hop += doll.hopV * dt / 16.7;
+  if(doll.hop > 0){ doll.hop = 0; doll.hopV = 0; }
+  if(doll.faceT > 0){ doll.faceT -= dt; if(doll.faceT <= 0) doll.face = 'idle'; }
+  doll.blinkT -= dt; if(doll.blinkT <= 0) doll.blinkT = 2200 + Math.random() * 1800;
+  if(combo > 0 && performance.now() - lastHitT > 1500) combo = 0, comboEl.textContent = 0;
+  floats.forEach(f=>{ f.y -= .8; f.life -= .014; }); floats = floats.filter(f=> f.life > 0);
+  stars.forEach(s=>{ s.x += s.vx; s.y += s.vy; s.vy += .12; s.life -= .02; }); stars = stars.filter(s=> s.life > 0);
+  shake *= .88;
+  ctx.save();
+  if(shake > .3) ctx.translate((Math.random() - .5) * shake, (Math.random() - .5) * shake);
+  drawRoom(); drawDoll(); drawStars(); drawFloats();
+  ctx.restore();
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
